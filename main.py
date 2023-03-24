@@ -7,6 +7,11 @@ from database import Data
 import aiohttp
 import asyncio
 import time
+import aiofiles
+import functools
+from asyncio_throttle import Throttler
+
+
 start_time = time.time()
 
 
@@ -59,79 +64,94 @@ HEADERS = {
 df = p.read_excel(io='cars.xlsx')
 cars = df.to_dict('records')
 
-async def solve_captcha(session, url, vin_nomer):
-    async with session.get(url) as resp:
-        answer = await resp.json()
-        token = answer['token']
-        image = answer['base64jpg']
 
-        # creating image
-        with open("imageToSave.png", "wb") as fh:
-            fh.write(base64.urlsafe_b64decode(image))
+#________________CAPTCHA FUNCTION____________________
+async def captcha_func():
+    solver = imagecaptcha()
+    solver.set_verbose(1)
+    solver.set_key("b78746e5f1f1678b4050533a1667e4be")
+    solver.set_soft_id(0)
+    loop = asyncio.get_event_loop()
 
-        # solving captcha
-        solver = imagecaptcha()
-        solver.set_verbose(1)
-        solver.set_key("b78746e5f1f1678b4050533a1667e4be")
-        solver.set_soft_id(0)
-        captcha_text = solver.solve_and_return_solution("imageToSave.png")
-        if captcha_text != 0:
-            result = True
-            # print("captcha text "+captcha_text)
+    captcha_text = await loop.run_in_executor(
+        None,
+        functools.partial(solver.solve_and_return_solution,
+        file_path="imageToSave.png"))
+    return captcha_text
+
+
+#______________ADDING TO DATABASE___________________
+
+async def adding_to_db(r):
+    new_data = Data()
+    res = r.get('requestTime')
+    new_data.requestTime = res
+    if res:
+        main_info = r.get('RequestResult').get('diagnosticCards')[0]
+        print(f'main info {main_info}')
+        if main_info:
+            new_data.dcExpirationDate = main_info.get('dcExpirationDate')
+            new_data.pointAddress = main_info.get('pointAddress')
+            new_data.chassis = main_info.get('chassis')
+            new_data.operatorName = main_info.get('operatorName')
+            new_data.odometerValue = main_info.get('odometerValue')
+            new_data.dcNumber = main_info.get('dcNumber')
+            new_data.model = main_info.get('model')
+            new_data.brand = main_info.get('brand')
         else:
-            # print("task finished with error "+solver.error_code)
-            solver.report_incorrect_image_captcha()
-            result = False
+            print('didnt get main_info')
+    new_data.save()
 
-        if captcha_text:
-            print('waiting 10 sec')
-            # time.sleep(10)
-            data = {
-                "vin": vin_nomer,
-                "checkType": 'restricted',
-                "captchaWord": captcha_text,
-                "captchaToken": token
-            }
-            print('we are here')
-            async with session.post(DIAGNOSTIC_URL, headers=HEADERS, data=data) as resp:
-                r = await resp.json()
-                print(r)
+async def solve_captcha(session, url, throttler, vin_nomer):
+    async with throttler:
+        async with session.get(url) as resp:
+            answer = await resp.json()
+            token = answer['token']
+            image = answer['base64jpg']
 
-            if resp.status == 200:
-                print(resp.status)
-                main_info = r.get('RequestResult').get('diagnosticCards')[0]
-                print(f'main info {main_info}')
-                new_data = Data()
-                new_data.requestTime = r.get('requestTime')
-                if main_info:
-                    new_data.dcExpirationDate = main_info.get('dcExpirationDate')
-                    new_data.pointAddress = main_info.get('pointAddress')
-                    new_data.chassis = main_info.get('chassis')
-                    new_data.operatorName = main_info.get('operatorName')
-                    new_data.odometerValue = main_info.get('odometerValue')
-                    new_data.dcNumber = main_info.get('dcNumber')
-                    new_data.model = main_info.get('model')
-                    new_data.brand = main_info.get('brand')
+            # creating image
+            await asyncio.sleep(1)
+            async with aiofiles.open("imageToSave.png", "wb") as fh:
+                await fh.write(base64.urlsafe_b64decode(image))
+
+            # solving captcha
+            captcha_text = await captcha_func()
+
+            if captcha_text:
+                print('waiting 10 sec')
+                # time.sleep(10)
+                data = {
+                    "vin": vin_nomer,
+                    "checkType": 'restricted',
+                    "captchaWord": captcha_text,
+                    "captchaToken": token
+                }
+                print('we are here')
+                async with session.post(DIAGNOSTIC_URL, headers=HEADERS, data=data) as resp:
+                    r = await resp.json()
+                    print(r)
+
+                if resp.status == 200:
+                    print(resp.status)
+                    await adding_to_db(r)
+                    print("data added to db")
                 else:
-                    print('didnt get main_info')
-                new_data.save()
-                print("data added to db")
+                    print('solved not correct')
             else:
-                print('solved not correct')
-        else:
-            print('couldnt solve')
+                print('couldnt solve')
 
 
 
 async def main():
     async with aiohttp.ClientSession() as session:
         tasks = []
+        throttler = Throttler(rate_limit=1, period=1)
         for i in range(len(cars)):
             vin_nomer = cars[i]['VIN']
             url = URL_CAPTCHA
 
             #create session getting captcha information
-            tasks.append(asyncio.ensure_future(solve_captcha(session, url, vin_nomer=vin_nomer)))
+            tasks.append(asyncio.create_task(solve_captcha(session, url, throttler, vin_nomer)))
 
         await asyncio.gather(*tasks)
 
