@@ -153,7 +153,7 @@ async def main():
             #create session getting captcha information
             tasks.append(asyncio.create_task(solve_captcha(session, url, throttler, vin_nomer)))
 
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks, return_exceptions=False)
 
 
 db.close()
