@@ -1,11 +1,14 @@
-from requests_html import AsyncHTMLSession #requests module
 from anticaptchaofficial.imagecaptcha import * #captcha module
 import base64 #make image from base64 string
 from fake_useragent import UserAgent #generate user-agent
 import pandas as p
-import time
 from peewee import *
 from database import Data
+import aiohttp
+import asyncio
+import time
+start_time = time.time()
+
 
 #__________PROXIES__________#
 
@@ -19,6 +22,8 @@ def get_proxy(proxy_ip, proxy_port):
     proxies = {f"https': 'https://GKrm9k:LeR86P@{proxy_ip}:{proxy_port}"}
     return proxies
 
+
+
 #__________DATABASE__________#
 
 db = SqliteDatabase('people.db')
@@ -30,6 +35,7 @@ db.connect()
 URL_CAPTCHA = 'https://check.gibdd.ru/captcha'
 RESTRICT_URL = 'https://xn--b1afk4ade.xn--90adear.xn--p1ai/proxy/check/auto/restrict'
 DIAGNOSTIC_URL = 'https://xn--b1afk4ade.xn--90adear.xn--p1ai/proxy/check/auto/diagnostic'
+FREE_PROXIES = []
 
 #generating user-agent
 ua = UserAgent()
@@ -53,27 +59,17 @@ HEADERS = {
 df = p.read_excel(io='cars.xlsx')
 cars = df.to_dict('records')
 
+async def solve_captcha(session, url, vin_nomer):
+    async with session.get(url) as resp:
+        answer = await resp.json()
+        token = answer['token']
+        image = answer['base64jpg']
 
-async def main():
-
-    for i in range(len(cars)):
-        # time.sleep(10)
-        vin_nomer = cars[i]['VIN']
-
-        #create session getting captcha information
-        proxy = random.choice(free_proxies)
-
-        asession = AsyncHTMLSession()
-        url = URL_CAPTCHA
-        r = await asession.get(url, proxies={'http': proxy, 'https': proxy})
-        token = r.json()['token']
-        image = r.json()['base64jpg']
-
-        #creating image
+        # creating image
         with open("imageToSave.png", "wb") as fh:
-          fh.write(base64.urlsafe_b64decode(image))
+            fh.write(base64.urlsafe_b64decode(image))
 
-        #solving captcha
+        # solving captcha
         solver = imagecaptcha()
         solver.set_verbose(1)
         solver.set_key("b78746e5f1f1678b4050533a1667e4be")
@@ -87,8 +83,7 @@ async def main():
             solver.report_incorrect_image_captcha()
             result = False
 
-        #sending request to gibdd
-        if result:
+        if captcha_text:
             print('waiting 10 sec')
             # time.sleep(10)
             data = {
@@ -97,10 +92,13 @@ async def main():
                 "captchaWord": captcha_text,
                 "captchaToken": token
             }
-            r = await asession.post(DIAGNOSTIC_URL, headers=HEADERS, data=data, proxies={'http': proxy, 'https': proxy})
-            if r.status_code == 200:
-                print(r.status_code)
-                r = r.json()
+            print('we are here')
+            async with session.post(DIAGNOSTIC_URL, headers=HEADERS, data=data) as resp:
+                r = await resp.json()
+                print(r)
+
+            if resp.status == 200:
+                print(resp.status)
                 main_info = r.get('RequestResult').get('diagnosticCards')[0]
                 print(f'main info {main_info}')
                 new_data = Data()
@@ -120,10 +118,22 @@ async def main():
                 print("data added to db")
             else:
                 print('solved not correct')
-                i -= 1
         else:
-            i -= 1
             print('couldnt solve')
+
+
+
+async def main():
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for i in range(len(cars)):
+            vin_nomer = cars[i]['VIN']
+            url = URL_CAPTCHA
+
+            #create session getting captcha information
+            tasks.append(asyncio.ensure_future(solve_captcha(session, url, vin_nomer=vin_nomer)))
+
+        await asyncio.gather(*tasks)
 
 
 db.close()
@@ -131,7 +141,9 @@ db.close()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
+    print("--- %s seconds ---" % (time.time() - start_time))
+
 
 
 
